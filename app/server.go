@@ -34,25 +34,27 @@ func main() {
 		fmt.Println("Failed to bind to port 4221")
 		os.Exit(1)
 	}
-
-	conn, err := l.Accept()
-	defer conn.Close()
-
-	if err != nil {
-		fmt.Println("Error accepting connection: ", err.Error())
-		os.Exit(1)
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection: ", err.Error())
+			os.Exit(1)
+		}
+		go handleConnection(conn)
 	}
+}
 
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
 	req, err := connectionToRequest(conn)
 	if err != nil {
 		fmt.Println("Error parsing connection as request: ", err.Error())
-		os.Exit(1)
+		return
 	}
-
 	err = handleResponse(conn, req)
 	if err != nil {
 		fmt.Println("Error responding to request: ", err.Error())
-		os.Exit(1)
+		return
 	}
 }
 
@@ -104,25 +106,21 @@ func handleResponse(conn net.Conn, req request) error {
 	if req.path == "/" {
 		res.status = ResponseOK
 	} else if req.path == "/user-agent" {
-		ua, ok := req.headers["User-Agent"]
-		if !ok {
-			return errors.New("Failed to extract user-agent header")
-		}
-		res.status = ResponseOK
-		res.headers = make(headers, 2)
-		res.headers["Content-Type"] = "text/plain"
-		res.headers["Content-Length"] = fmt.Sprint(len(ua))
-		res.content = ua
+		responseContent(&res, req.headers["User-Agent"])
 	} else if p, ok := strings.CutPrefix(req.path, "/echo/"); ok {
-		res.status = ResponseOK
-		res.headers = make(headers, 2)
-		res.headers["Content-Type"] = "text/plain"
-		res.headers["Content-Length"] = fmt.Sprint(len(p))
-		res.content = p
+		responseContent(&res, p)
 	} else {
 		res.status = ResponseNotFound
 	}
 	return writeResponse(conn, res)
+}
+
+func responseContent(res *response, content string) {
+	res.status = ResponseOK
+	res.headers = make(headers, 2)
+	res.headers["Content-Type"] = "text/plain"
+	res.headers["Content-Length"] = fmt.Sprint(len(content))
+	res.content = content
 }
 
 func writeResponse(conn net.Conn, res response) error {
