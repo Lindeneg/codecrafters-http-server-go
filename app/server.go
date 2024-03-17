@@ -17,9 +17,15 @@ type request struct {
 	headers headers
 }
 
+type response struct {
+	status  string
+	headers headers
+	content string
+}
+
 const (
-	ResponseOK       = "HTTP/1.1 200 OK\r\n\r\n"
-	ResponseNotFound = "HTTP/1.1 404 Not Found\r\n\r\n"
+	ResponseOK       = "HTTP/1.1 200 OK"
+	ResponseNotFound = "HTTP/1.1 404 Not Found"
 )
 
 func main() {
@@ -94,14 +100,41 @@ func parseHeaderLines(headerLines []string, req *request) {
 }
 
 func handleResponse(conn net.Conn, req request) error {
-	var err error
-	switch req.path {
-	case "/":
-		_, err = conn.Write([]byte(ResponseOK))
-		break
-	default:
-		_, err = conn.Write([]byte(ResponseNotFound))
-		break
+	res := response{}
+	if req.path == "/" {
+		res.status = ResponseOK
+	} else if p, ok := strings.CutPrefix(req.path, "/echo/"); ok {
+		res.status = ResponseOK
+		res.headers = make(headers, 2)
+		res.headers["Content-Type"] = "text/plain"
+		res.headers["Content-Length"] = fmt.Sprint(len(p))
+		res.content = p
+	} else {
+		res.status = ResponseNotFound
 	}
-	return err
+	return writeResponse(conn, res)
+}
+
+func writeResponse(conn net.Conn, res response) error {
+	_, err := conn.Write([]byte(fmt.Sprintf("%s\r\n", res.status)))
+	if err != nil {
+		return err
+	}
+	for k, v := range res.headers {
+		_, err := conn.Write([]byte(fmt.Sprintf("%s: %s\r\n", k, v)))
+		if err != nil {
+			return err
+		}
+	}
+	_, err = conn.Write([]byte("\r\n"))
+	if err != nil {
+		return err
+	}
+	if len(res.content) > 0 {
+		_, err := conn.Write([]byte(fmt.Sprintf("%s\r\n", res.content)))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
