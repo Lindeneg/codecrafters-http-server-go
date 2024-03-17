@@ -1,19 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
 )
 
 const (
-	ResponseOK       = "HTTP/1.1 200 OK"
-	ResponseNotFound = "HTTP/1.1 404 Not Found"
-	TypeTextPlain    = "text/plain"
-	TypeOctetStream  = "application/octet-stream"
+	ResponseOK            = "HTTP/1.1 200 OK"
+	ResponseCreated       = "HTTP/1.1 201 Created"
+	ResponseNotFound      = "HTTP/1.1 404 Not Found"
+	ResponseInternalError = "HTTP/1.1 500 Internal Server Error"
+	TypeTextPlain         = "text/plain"
+	TypeOctetStream       = "application/octet-stream"
 )
 
 var (
@@ -47,6 +51,7 @@ type request struct {
 	path    string
 	version string
 	headers headers
+	body    string
 }
 
 func (r request) IsGet() bool {
@@ -107,6 +112,8 @@ func handleConnection(conn net.Conn) {
 	switch {
 	case req.IsGet():
 		handleGetRequest(req, &res)
+	case req.IsPost():
+		handlePostRequest(req, &res)
 	default:
 		res.status = ResponseNotFound
 	}
@@ -123,22 +130,25 @@ func connectionToRequest(conn net.Conn) (req request, err error) {
 	if err != nil {
 		return req, err
 	}
-	parts := strings.Split(string(buf), "\r\n")
-	if len(parts) == 0 {
-		return req, errors.New("HTTP startline missing")
+	startLineEndIdx := strings.Index(string(buf), "\r\n")
+	if startLineEndIdx < 0 {
+		return req, errors.New("start line delimiter not found")
 	}
-	startLine := parts[0]
-	headerLines := parts[1:]
-	err = parseStartline(startLine, &req)
+	headersEndIdx := strings.Index(string(buf), "\r\n\r\n")
+	if headersEndIdx < 0 {
+		return req, errors.New("headers delimiter not found")
+	}
+	err = parseStartline(buf[:startLineEndIdx+2], &req)
 	if err != nil {
 		return req, err
 	}
-	parseHeaderLines(headerLines, &req)
+	parseHeaderLines(buf[startLineEndIdx+2:headersEndIdx+4], &req)
+	req.body = string(bytes.Trim(buf[headersEndIdx+4:], "\x00"))
 	return req, nil
 }
 
-func parseStartline(startLine string, req *request) error {
-	startLines := strings.Split(startLine, " ")
+func parseStartline(startLine []byte, req *request) error {
+	startLines := strings.Split(string(startLine), " ")
 	if len(startLines) != 3 {
 		return errors.New("HTTP startline should contain METHOD PATH VERSION")
 	}
@@ -148,7 +158,8 @@ func parseStartline(startLine string, req *request) error {
 	return nil
 }
 
-func parseHeaderLines(headerLines []string, req *request) {
+func parseHeaderLines(headerBytes []byte, req *request) {
+	headerLines := strings.Split(string(headerBytes), "\r\n")
 	if req.headers == nil {
 		req.headers = make(headers, len(headerLines))
 	}
@@ -179,6 +190,25 @@ func handleGetRequest(req request, res *response) {
 			responseContent(res, string(bytes), TypeOctetStream)
 			return
 		}
+	}
+	res.status = ResponseNotFound
+}
+
+func handlePostRequest(req request, res *response) {
+	if p, ok := strings.CutPrefix(req.path, "/files/"); ok {
+		file, err := os.Create(fmt.Sprintf("%s/%s", directory, p))
+		if err != nil {
+			res.status = ResponseInternalError
+			return
+		}
+		defer file.Close()
+		_, err = io.Copy(file, strings.NewReader(req.body))
+		if err != nil {
+			res.status = ResponseInternalError
+			return
+		}
+		res.status = ResponseCreated
+		return
 	}
 	res.status = ResponseNotFound
 }
