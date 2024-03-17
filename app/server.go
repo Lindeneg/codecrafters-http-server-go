@@ -103,6 +103,16 @@ func handleResponse(conn net.Conn, req request) error {
 	res := response{}
 	if req.path == "/" {
 		res.status = ResponseOK
+	} else if req.path == "/user-agent" {
+		ua, ok := req.headers["User-Agent"]
+		if !ok {
+			return errors.New("Failed to extract user-agent header")
+		}
+		res.status = ResponseOK
+		res.headers = make(headers, 2)
+		res.headers["Content-Type"] = "text/plain"
+		res.headers["Content-Length"] = fmt.Sprint(len(ua))
+		res.content = ua
 	} else if p, ok := strings.CutPrefix(req.path, "/echo/"); ok {
 		res.status = ResponseOK
 		res.headers = make(headers, 2)
