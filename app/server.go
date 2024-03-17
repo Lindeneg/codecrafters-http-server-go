@@ -2,11 +2,43 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"os"
 	"strings"
 )
+
+const (
+	ResponseOK       = "HTTP/1.1 200 OK"
+	ResponseNotFound = "HTTP/1.1 404 Not Found"
+	TypeTextPlain    = "text/plain"
+	TypeOctetStream  = "application/octet-stream"
+)
+
+var (
+	protocol  string
+	host      string
+	port      string
+	directory string
+)
+
+func main() {
+	parseEnv()
+	l, err := net.Listen(protocol, fmt.Sprintf("%s:%s", host, port))
+	if err != nil {
+		fmt.Println("Failed to bind to port ", port)
+		os.Exit(1)
+	}
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection: ", err.Error())
+			continue
+		}
+		go handleConnection(conn)
+	}
+}
 
 type headers map[string]string
 
@@ -17,31 +49,51 @@ type request struct {
 	headers headers
 }
 
+func (r request) IsGet() bool {
+	return r.method == "GET"
+}
+
+func (r request) IsPost() bool {
+	return r.method == "POST"
+}
+
 type response struct {
 	status  string
 	headers headers
 	content string
 }
 
-const (
-	ResponseOK       = "HTTP/1.1 200 OK"
-	ResponseNotFound = "HTTP/1.1 404 Not Found"
-)
-
-func main() {
-	l, err := net.Listen("tcp", "0.0.0.0:4221")
+func (res response) WriteToConn(conn net.Conn) error {
+	_, err := conn.Write([]byte(fmt.Sprintf("%s\r\n", res.status)))
 	if err != nil {
-		fmt.Println("Failed to bind to port 4221")
-		os.Exit(1)
+		return err
 	}
-	for {
-		conn, err := l.Accept()
+	for k, v := range res.headers {
+		_, err := conn.Write([]byte(fmt.Sprintf("%s: %s\r\n", k, v)))
 		if err != nil {
-			fmt.Println("Error accepting connection: ", err.Error())
-			os.Exit(1)
+			return err
 		}
-		go handleConnection(conn)
 	}
+	_, err = conn.Write([]byte("\r\n"))
+	if err != nil {
+		return err
+	}
+	if len(res.content) > 0 {
+		_, err := conn.Write([]byte(fmt.Sprintf("%s\r\n", res.content)))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func parseEnv() {
+	flag.StringVar(&protocol, "protocol", "tcp", "protocol to use")
+	flag.StringVar(&host, "host", "0.0.0.0", "host to use")
+	flag.StringVar(&port, "port", "4221", "port to use")
+	flag.StringVar(&directory, "directory", "", "dir with files to serve")
+	flag.Parse()
+	fmt.Printf("Listening at %s://%s:%s and serving directory %q\n", protocol, host, port, directory)
 }
 
 func handleConnection(conn net.Conn) {
@@ -51,7 +103,14 @@ func handleConnection(conn net.Conn) {
 		fmt.Println("Error parsing connection as request: ", err.Error())
 		return
 	}
-	err = handleResponse(conn, req)
+	res := response{}
+	switch {
+	case req.IsGet():
+		handleGetRequest(req, &res)
+	default:
+		res.status = ResponseNotFound
+	}
+	err = res.WriteToConn(conn)
 	if err != nil {
 		fmt.Println("Error responding to request: ", err.Error())
 		return
@@ -101,48 +160,35 @@ func parseHeaderLines(headerLines []string, req *request) {
 	}
 }
 
-func handleResponse(conn net.Conn, req request) error {
-	res := response{}
+func handleGetRequest(req request, res *response) {
 	if req.path == "/" {
 		res.status = ResponseOK
-	} else if req.path == "/user-agent" {
-		responseContent(&res, req.headers["User-Agent"])
-	} else if p, ok := strings.CutPrefix(req.path, "/echo/"); ok {
-		responseContent(&res, p)
-	} else {
-		res.status = ResponseNotFound
+		return
 	}
-	return writeResponse(conn, res)
+	if req.path == "/user-agent" {
+		responseContent(res, req.headers["User-Agent"], TypeTextPlain)
+		return
+	}
+	if p, ok := strings.CutPrefix(req.path, "/echo/"); ok {
+		responseContent(res, p, TypeTextPlain)
+		return
+	}
+	if p, ok := strings.CutPrefix(req.path, "/files/"); ok {
+		bytes, err := os.ReadFile(fmt.Sprintf("%s/%s", directory, p))
+		if err == nil {
+			responseContent(res, string(bytes), TypeOctetStream)
+			return
+		}
+	}
+	res.status = ResponseNotFound
 }
 
-func responseContent(res *response, content string) {
+func responseContent(res *response, content string, contentType string) {
+	if res.headers == nil {
+		res.headers = make(headers, 2)
+	}
 	res.status = ResponseOK
-	res.headers = make(headers, 2)
-	res.headers["Content-Type"] = "text/plain"
+	res.headers["Content-Type"] = contentType
 	res.headers["Content-Length"] = fmt.Sprint(len(content))
 	res.content = content
-}
-
-func writeResponse(conn net.Conn, res response) error {
-	_, err := conn.Write([]byte(fmt.Sprintf("%s\r\n", res.status)))
-	if err != nil {
-		return err
-	}
-	for k, v := range res.headers {
-		_, err := conn.Write([]byte(fmt.Sprintf("%s: %s\r\n", k, v)))
-		if err != nil {
-			return err
-		}
-	}
-	_, err = conn.Write([]byte("\r\n"))
-	if err != nil {
-		return err
-	}
-	if len(res.content) > 0 {
-		_, err := conn.Write([]byte(fmt.Sprintf("%s\r\n", res.content)))
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
